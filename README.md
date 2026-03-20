@@ -42,12 +42,6 @@ The [Grid Event Signature Library (GESL)](https://gesl.ornl.gov) at Oak Ridge Na
 git clone https://github.com/YOUR_USERNAME/grid-signal-academy.git
 cd grid-signal-academy
 
-# Create the required directories
-mkdir -p static data
-
-# Move the frontend into place (if not already in static/)
-# mv index.html static/index.html
-
 # Install dependencies
 pip install flask requests
 
