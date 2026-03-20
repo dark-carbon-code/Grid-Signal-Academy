@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grid Signal Academy — GESL Training Platform</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'JetBrains Mono',monospace; background:#050a16; color:#e2e8f0; }
+#root { min-height:100vh; }
+.boot{display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:14px}
+.boot h1{font-family:'Orbitron',sans-serif;font-size:22px;letter-spacing:3px;background:linear-gradient(135deg,#22d3ee,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.boot p{color:#8899b4;font-size:11px}
+.spin{width:36px;height:36px;border:2px solid #22d3ee33;border-top-color:#22d3ee;border-radius:50%;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="root"><div class="boot"><div class="spin"></div><h1>GRID SIGNAL ACADEMY</h1><p>Loading...</p></div></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+<script>
+// Polyfill window.storage using localStorage for standalone mode
+if(!window.storage){window.storage={
+  get:async function(k){try{var v=localStorage.getItem('gsa-'+k);return v?{key:k,value:v}:null}catch(e){return null}},
+  set:async function(k,v){try{localStorage.setItem('gsa-'+k,typeof v==='string'?v:JSON.stringify(v));return{key:k,value:v}}catch(e){return null}},
+  delete:async function(k){try{localStorage.removeItem('gsa-'+k);return{key:k,deleted:true}}catch(e){return null}}
+}}
+// API base — same origin when served by Flask
+window.GSA_API = window.location.origin + '/api';
+</script>
+
+<script type="text/babel" data-presets="react">
+// ═══════════════════════════════════════════════════════════════
+// Grid Signal Academy v3 — Phase 1 Demo Build
+// Standalone React app wired to Flask backend for GESL proxy
+// ═══════════════════════════════════════════════════════════════
+
+const {useState, useEffect, useRef, useMemo, useCallback} = React;
+
+const TAXONOMY = {
+  Events: {
+    "Power Quality": {
+      Static: {desc:"Sustained deviation from nominal lasting multiple cycles",visual:"flat_deviation",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      Transient: {desc:"Brief sharp disturbance less than one cycle",visual:"spike",ieee:"IEEE 1159",sensor:"PoW"},
+    },
+    Fault: {
+      "Single Line-to-Ground":{desc:"One phase shorts to ground — ~70% of all faults",visual:"slg_fault",ieee:"IEEE C37.011",sensor:"PMU/PoW"},
+      "Line-to-Line":{desc:"Two phases short together, no ground",visual:"ll_fault",ieee:"IEEE C37.011",sensor:"PMU/PoW"},
+      "Double Line-to-Ground":{desc:"Two phases short to ground simultaneously",visual:"dlg_fault",ieee:"IEEE C37.011",sensor:"PMU/PoW"},
+      "Three-Phase Fault":{desc:"All phases short — most severe, ~5% occurrence",visual:"three_phase_fault",ieee:"IEEE C37.011",sensor:"PMU/PoW"},
+    },
+    "Generation Event": {
+      "Generator Trip":{desc:"Sudden unit disconnection causing frequency decline",visual:"gen_trip",ieee:"IEEE C37.102",sensor:"PMU/FDR"},
+      "Load Rejection":{desc:"Sudden load loss causing frequency/voltage rise",visual:"load_rejection",ieee:"IEEE C37.102",sensor:"PMU/FDR"},
+    },
+    Oscillation: {
+      "Inter-area":{desc:"Low-frequency oscillation (0.1-1 Hz) between generator groups",visual:"interarea_osc",ieee:"IEEE 1159",sensor:"PMU"},
+      "Local":{desc:"Higher-frequency oscillation (1-2 Hz) single machine vs system",visual:"local_osc",ieee:"IEEE 1159",sensor:"PMU"},
+    },
+    Switching: {
+      "Capacitor Switching":{desc:"Oscillatory transient from cap bank energization",visual:"cap_switch",ieee:"IEEE C37.012",sensor:"PoW"},
+      "Line Switching":{desc:"Transient from line breaker operation",visual:"line_switch",ieee:"IEEE C37.011",sensor:"PMU/PoW"},
+    },
+  },
+  State: {
+    "Voltage Sag": {
+      "Instantaneous Sag":{desc:"Voltage 0.1-0.9 pu for 0.5-30 cycles",visual:"sag_instant",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      "Momentary Sag":{desc:"Voltage 0.1-0.9 pu for 30 cycles to 3 sec",visual:"sag_momentary",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      "Temporary Sag":{desc:"Voltage 0.1-0.9 pu for 3 sec to 1 min",visual:"sag_temporary",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+    },
+    "Voltage Swell": {
+      "Instantaneous Swell":{desc:"Voltage 1.1-1.8 pu for 0.5-30 cycles",visual:"swell_instant",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      "Momentary Swell":{desc:"Voltage 1.1-1.4 pu for 30 cycles to 3 sec",visual:"swell_momentary",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+    },
+    Interruption: {
+      "Momentary Interruption":{desc:"Voltage below 0.1 pu for 0.5 cycles to 3 sec",visual:"interrupt_momentary",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      "Temporary Interruption":{desc:"Voltage below 0.1 pu for 3 sec to 1 min",visual:"interrupt_temporary",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+    },
+    "Frequency Excursion": {
+      "Frequency Undershoot":{desc:"Frequency below 59.95 Hz — gen < load",visual:"freq_under",ieee:"IEEE C37.118",sensor:"PMU/FDR"},
+      "Frequency Overshoot":{desc:"Frequency above 60.05 Hz — gen > load",visual:"freq_over",ieee:"IEEE C37.118",sensor:"PMU/FDR"},
+    },
+  },
+  Equipment: {
+    "Interrupting Device": {
+      "Circuit Breaker":{desc:"Fault current interruption — current cessation",visual:"cb_operation",ieee:"IEEE C37.04",sensor:"PoW"},
+      "Recloser":{desc:"Auto re-energization — repeated sag/recovery pattern",visual:"recloser",ieee:"IEEE C37.60",sensor:"PoW"},
+      "Fuse":{desc:"One-time device melts to permanently clear circuit",visual:"fuse_blow",ieee:"IEEE C37.40",sensor:"PoW"},
+    },
+    Transformer: {
+      "Tap Changer":{desc:"ULTC adjusts turns ratio — discrete voltage step",visual:"tap_change",ieee:"IEEE C57.131",sensor:"PMU"},
+      "Saturation":{desc:"Core saturation — odd-harmonic current distortion",visual:"saturation",ieee:"IEEE C57.12",sensor:"PoW"},
+    },
+    "Rotating Machine": {
+      "Motor Starting":{desc:"6-10x inrush draws voltage down, recovers over seconds",visual:"motor_start",ieee:"IEEE 3002.7",sensor:"PoW"},
+      "Generator Sync":{desc:"Transient during grid synchronization",visual:"gen_sync",ieee:"IEEE C50.13",sensor:"PMU"},
+    },
+  },
+  Conditions: {
+    Weather: {
+      "Lightning":{desc:"Atmospheric discharge flashover — fast transient + fault clearing",visual:"lightning",ieee:"IEEE C62.82",sensor:"PoW"},
+      "Wind Event":{desc:"Conductor galloping / vegetation contact from high winds",visual:"wind_event",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      "Ice Loading":{desc:"Conductor sag/galloping from ice accumulation",visual:"ice_event",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+    },
+    Vegetation: {"Tree Contact":{desc:"Intermittent high-impedance arcing from vegetation",visual:"tree_contact",ieee:"IEEE 1159",sensor:"PoW"}},
+    "Equipment Failure": {
+      "Insulation Failure":{desc:"Partial discharge or flashover from degraded insulation",visual:"insulation_fail",ieee:"IEEE C57.104",sensor:"PoW/UHF"},
+      "Mechanical Failure":{desc:"Broken conductor, failed joint, cracked insulator",visual:"mech_fail",ieee:"IEEE 1159",sensor:"PoW"},
+    },
+  },
+  Phase: {
+    "Single Phase": {
+      "Phase A":{desc:"Event isolated to Phase A",visual:"phase_a",ieee:"IEEE C37.118",sensor:"PMU"},
+      "Phase B":{desc:"Event isolated to Phase B (120deg offset)",visual:"phase_b",ieee:"IEEE C37.118",sensor:"PMU"},
+      "Phase C":{desc:"Event isolated to Phase C (240deg offset)",visual:"phase_c",ieee:"IEEE C37.118",sensor:"PMU"},
+    },
+    "Multi-Phase": {
+      "Phases AB":{desc:"Event affects A and B simultaneously",visual:"phase_ab",ieee:"IEEE C37.118",sensor:"PMU"},
+      "Phases BC":{desc:"Event affects B and C simultaneously",visual:"phase_bc",ieee:"IEEE C37.118",sensor:"PMU"},
+      "All Three Phases":{desc:"Balanced event all phases equally",visual:"phase_abc",ieee:"IEEE C37.118",sensor:"PMU"},
+    },
+  },
+  Normal: {
+    "Steady State": {
+      "Clean Sinusoidal":{desc:"Normal 60 Hz three-phase — no anomalies",visual:"normal_clean",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+      "Normal Load Variation":{desc:"Gradual load change within normal bounds",visual:"normal_load",ieee:"IEEE 1159",sensor:"PMU"},
+      "Background Noise":{desc:"Normal measurement noise floor — no event",visual:"normal_noise",ieee:"IEEE 1159",sensor:"PMU/PoW"},
+    },
+    "Expected Transient": {
+      "Normal Switching":{desc:"Routine breaker operation within design parameters",visual:"normal_switch",ieee:"IEEE C37.04",sensor:"PoW"},
+      "Normal Motor Start":{desc:"Expected inrush within acceptable voltage deviation",visual:"normal_motor",ieee:"IEEE 3002.7",sensor:"PoW"},
+    },
+  },
+};
+
+function genWave(v,w,h,seed){const pts=[];const N=200;const nom=h/2;const amp=h*0.35;const fr=8;const so=((seed||0)%100)*0.001;const pn=(i)=>Math.sin(i*127.1+(seed||0)*311.7)*0.7;for(let i=0;i<N;i++){const t=i/N+so;let y=nom;const b=Math.sin(2*Math.PI*fr*t);switch(v){case"normal_clean":y=nom-amp*b;break;case"normal_load":y=nom-amp*b*(1+0.03*Math.sin(0.5*t));break;case"normal_noise":y=nom-amp*b+amp*0.02*pn(i);break;case"normal_switch":y=nom-amp*b*(t>0.48&&t<0.52?0.95:1);break;case"normal_motor":y=nom-amp*b*(t>0.2?Math.max(0.88,1-0.12*Math.exp(-6*(t-0.2))):1);break;case"flat_deviation":y=nom-amp*0.7*b-(t>0.3&&t<0.7?amp*0.15:0);break;case"spike":y=nom-amp*b*(1+(t>0.45&&t<0.55?3*Math.exp(-Math.pow((t-0.5)*50,2)):0));break;case"slg_fault":y=nom-amp*b*(t>0.35&&t<0.65?0.3:1)+(t>0.35&&t<0.65?amp*0.1*pn(i):0);break;case"ll_fault":y=nom-amp*b*(t>0.3&&t<0.6?0.45+0.15*Math.sin(30*t):1);break;case"dlg_fault":y=nom-amp*b*(t>0.3&&t<0.65?0.25:1)+(t>0.3&&t<0.65?amp*0.2*Math.sin(20*t):0);break;case"three_phase_fault":y=nom-amp*b*(t>0.35&&t<0.6?0.1+0.05*pn(i):1);break;case"gen_trip":y=nom-amp*b*(t>0.4?0.85-0.3*Math.sin(1.5*Math.PI*(t-0.4))*Math.exp(-3*(t-0.4)):1);break;case"load_rejection":y=nom-amp*b*(t>0.35?1.3*Math.exp(-2*(t-0.35))+0.05*Math.sin(25*(t-0.35)):1);break;case"interarea_osc":y=nom-amp*b*(1+0.3*Math.sin(2*Math.PI*0.5*t*fr));break;case"local_osc":y=nom-amp*b*(1+0.4*Math.sin(2*Math.PI*1.5*t*fr)*Math.exp(-2*t));break;case"cap_switch":{const cs=t>0.4&&t<0.55;y=nom-amp*b*(cs?1.4:1)+(cs?amp*0.3*Math.exp(-30*(t-0.4))*Math.sin(80*t):0);break;}case"line_switch":y=nom-amp*b*(t>0.45&&t<0.55?0.4+0.6*Math.exp(-20*Math.abs(t-0.5)):1);break;case"sag_instant":y=nom-amp*b*(t>0.35&&t<0.5?0.55:1);break;case"sag_momentary":y=nom-amp*b*(t>0.25&&t<0.75?0.6:1);break;case"sag_temporary":y=nom-amp*b*(t>0.15&&t<0.85?0.65:1);break;case"swell_instant":y=nom-amp*b*(t>0.35&&t<0.5?1.5:1);break;case"swell_momentary":y=nom-amp*b*(t>0.25&&t<0.75?1.3:1);break;case"interrupt_momentary":y=nom-amp*b*(t>0.35&&t<0.55?0.02:1);break;case"interrupt_temporary":y=nom-amp*b*(t>0.2&&t<0.8?0.02:1);break;case"freq_under":{const fm=t>0.3?fr*(1-0.08*(1-Math.exp(-3*(t-0.3)))):fr;y=nom-amp*Math.sin(2*Math.PI*fm*t);break;}case"freq_over":{const fm=t>0.3?fr*(1+0.08*(1-Math.exp(-3*(t-0.3)))):fr;y=nom-amp*Math.sin(2*Math.PI*fm*t);break;}case"cb_operation":y=nom-amp*b*(t>0.45?(t<0.48?2*Math.exp(-50*(t-0.45)):0.05):1);break;case"recloser":y=nom-amp*b*((t>0.2&&t<0.3)||(t>0.5&&t<0.55)?0.05:(t>0.3&&t<0.5)?1.05:1);break;case"fuse_blow":y=nom-amp*b*(t>0.5?0.03:t>0.4?0.3+0.7*Math.exp(-10*(t-0.4)):1);break;case"tap_change":y=nom-amp*b*(t<0.4?0.92:t<0.45?0.92+0.08*((t-0.4)/0.05):1.0);break;case"saturation":y=nom-amp*(Math.sin(2*Math.PI*fr*t)+0.3*Math.sin(6*Math.PI*fr*t)+0.15*Math.sin(10*Math.PI*fr*t));break;case"motor_start":y=nom-amp*b*(t>0.15?Math.max(0.55,1-0.45*Math.exp(-4*(t-0.15))):1);break;case"gen_sync":y=nom-amp*b*(t>0.4&&t<0.6?1+0.3*Math.sin(20*(t-0.4))*Math.exp(-8*(t-0.4)):1);break;case"lightning":y=nom-amp*b+(t>0.48&&t<0.52?amp*2*Math.exp(-Math.pow((t-0.49)*70,2)/50):0);break;case"wind_event":y=nom-amp*b*(1+0.15*Math.sin(2*Math.PI*0.3*t*fr));break;case"ice_event":y=nom-amp*b*(1+0.2*Math.sin(2*Math.PI*0.2*t*fr));break;case"tree_contact":y=nom-amp*b*(t>0.3&&t<0.35?0.4:t>0.55&&t<0.6?0.5:1);break;case"insulation_fail":y=nom-amp*b+(t>0.3?amp*0.15*Math.sin(50*t)*Math.exp(-5*(t-0.3)):0);break;case"mech_fail":y=nom-amp*b*(t>0.4?0.7+0.3*Math.exp(-2*(t-0.4))+0.05*pn(i):1);break;default:y=nom-amp*b;}pts.push((i/N)*w+","+Math.max(1,Math.min(h-1,y)));}return pts.join(" ");}
+
+function buildPool(){const pool=[];Object.entries(TAXONOMY).forEach(([p,ss])=>{Object.entries(ss).forEach(([s,ts])=>{Object.entries(ts).forEach(([t,info])=>{pool.push({primary:p,secondary:s,tertiary:t,...info,isNormal:p==="Normal"});});});});return pool;}
+
+const DIFF={1:{n:"Apprentice",c:"#22d3ee",q:"primary",ch:3,tl:0,xp:1,ic:"\u{1F50C}"},2:{n:"Technician",c:"#34d399",q:"primary",ch:4,tl:30,xp:1.5,ic:"\u{1F527}"},3:{n:"Analyst",c:"#fbbf24",q:"secondary",ch:4,tl:25,xp:2,ic:"\u{1F4CA}"},4:{n:"Engineer",c:"#f97316",q:"tertiary",ch:4,tl:20,xp:3,ic:"\u26A1"},5:{n:"Grid Master",c:"#ef4444",q:"tertiary",ch:5,tl:15,xp:5,ic:"\u{1F451}"}};
+
+const BADGES=[{id:"f1",n:"First Light",i:"\u26A1",d:"First correct answer",ck:s=>s.tc>=1},{id:"s5",n:"Hot Streak",i:"\u{1F525}",d:"5 in a row",ck:s=>s.bs>=5},{id:"s10",n:"Unstoppable",i:"\u{1F4A5}",d:"10 in a row",ck:s=>s.bs>=10},{id:"x1",n:"Centurion",i:"\u{1F3DB}",d:"100 XP",ck:s=>s.xp>=100},{id:"x5",n:"Power Player",i:"\u26A1",d:"500 XP",ck:s=>s.xp>=500},{id:"x1k",n:"Grid Sage",i:"\u{1F9D9}",d:"1000 XP",ck:s=>s.xp>=1000},{id:"ap",n:"Broad Spectrum",i:"\u{1F310}",d:"All 5+ primaries",ck:s=>Object.keys(s.pc||{}).length>=5},{id:"pf",n:"Flawless",i:"\u{1F48E}",d:"Perfect round",ck:s=>s.pr>=1},{id:"sd",n:"Speed Demon",i:"\u23F1",d:"Correct <3s",ck:s=>s.fc<=3},{id:"l3",n:"Analyst",i:"\u{1F4CA}",d:"Level 3",ck:s=>s.lv>=3},{id:"l5",n:"Grid Master",i:"\u{1F451}",d:"Level 5",ck:s=>s.lv>=5},{id:"r10",n:"Dedicated",i:"\u{1F4DA}",d:"10 rounds",ck:s=>s.rp>=10},{id:"d3",n:"Consistent",i:"\u{1F4C5}",d:"3 daily drills",ck:s=>s.dd>=3},{id:"tg",n:"Gold Rush",i:"\u{1F947}",d:"12+ timed",ck:s=>s.tb>=12},{id:"nf",n:"Fault Finder",i:"\u{1F50D}",d:"10 Normal vs Fault",ck:s=>s.nfc>=10},{id:"ge",n:"GESL Explorer",i:"\u{1F52C}",d:"Live GESL data",ck:s=>s.gf},{id:"api",n:"Connected",i:"\u{1F517}",d:"API key configured",ck:s=>s.apiSet},{id:"st",n:"Scholar",i:"\u{1F393}",d:"Study 50 sigs",ck:s=>s.st>=50},{id:"rm",n:"Roadmap",i:"\u{1F5FA}",d:"View roadmap",ck:s=>s.rmV},{id:"comm",n:"Community",i:"\u{1F91D}",d:"Share progress",ck:s=>s.sh},{id:"mnt",n:"Mentored",i:"\u{1F9D1}\u200D\u{1F3EB}",d:"Ask the Grid Mentor",ck:s=>s.mentorUsed}];
+
+const ROADMAP=[{phase:1,name:"Live Signatures",status:"active",items:[{n:"GESL API proxy (CORS bypass)",done:true},{n:"SQLite persistent storage",done:true},{n:"API key configuration UI",done:true},{n:"Event tag taxonomy fetch",done:true},{n:"Signature metadata retrieval",done:true},{n:"Normal vs Fault mode",done:true},{n:"Multi-channel waveform viewer",done:true},{n:"4 game modes",done:true},{n:"Adaptive difficulty",done:true},{n:"Shared leaderboard",done:true},{n:"Real waveform CSV render",done:true},{n:"Grid Mentor AI tutor (Claude API)",done:true},{n:"Context-aware wrong-answer coaching",done:true}]},{phase:2,name:"Expert Layer",status:"planned",items:[{n:"User roles",done:false},{n:"PE credential verification",done:false},{n:"Operator anecdotes",done:false},{n:"Waveform annotation tool",done:false},{n:"Labeled dataset export",done:false},{n:"ROI value capture",done:false},{n:"Knowledge base",done:false}]},{phase:3,name:"Community",status:"future",items:[{n:"Profiles & networking",done:false},{n:"Discussion threads",done:false},{n:"Mentorship matching",done:false},{n:"Org pages (NERC/IEEE/EPRI/RTOs)",done:false},{n:"Challenge events",done:false},{n:"ML dataset pipeline",done:false}]}];
+
+function Wave({visual,w=400,h=100,color="#22d3ee",label,seed=0}){const pts=useMemo(()=>genWave(visual,w,h,seed),[visual,w,h,seed]);const gid="w"+visual+seed;return(<svg width="100%" viewBox={"0 0 "+w+" "+h} style={{display:"block"}}><defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.1"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs><rect width={w} height={h} fill="#070d1a" rx="3"/><line x1="0" y1={h/2} x2={w} y2={h/2} stroke="#1a2a45" strokeWidth="0.5" strokeDasharray="3,3"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.3" strokeLinejoin="round"/><polygon points={"0,"+h+" "+pts+" "+w+","+h} fill={"url(#"+gid+")"}/>{label&&<text x="5" y="11" fill={color} fontSize="8" fontFamily="monospace" opacity="0.55">{label}</text>}</svg>);}
+
+// ─── REAL WAVEFORM RENDERER — renders actual GESL CSV data ───
+function RealWave({timestamps,values,w=400,h=100,color="#22d3ee",label,unit=""}){
+  const pts=useMemo(()=>{
+    if(!timestamps||!values||values.length<2)return"";
+    const n=values.length;
+    const tMin=Math.min(...timestamps),tMax=Math.max(...timestamps);
+    const vMin=Math.min(...values),vMax=Math.max(...values);
+    const tRange=tMax-tMin||1;const vRange=vMax-vMin||1;
+    const pad=h*0.05;
+    return values.map((v,i)=>{
+      const x=((timestamps[i]-tMin)/tRange)*w;
+      const y=pad+(1-(v-vMin)/vRange)*(h-2*pad);
+      return x.toFixed(1)+","+y.toFixed(1);
+    }).join(" ");
+  },[timestamps,values,w,h]);
+  const gid="rw"+label+(timestamps?timestamps.length:0);
+  if(!pts)return(<svg width="100%" viewBox={"0 0 "+w+" "+h} style={{display:"block"}}><rect width={w} height={h} fill="#070d1a" rx="3"/><text x={w/2} y={h/2} fill="#8899b4" fontSize="9" textAnchor="middle" fontFamily="monospace">No data</text></svg>);
+  const vMin=values?Math.min(...values):0;const vMax=values?Math.max(...values):0;
+  return(<svg width="100%" viewBox={"0 0 "+w+" "+h} style={{display:"block"}}><defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.1"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs><rect width={w} height={h} fill="#070d1a" rx="3"/><line x1="0" y1={h/2} x2={w} y2={h/2} stroke="#1a2a45" strokeWidth="0.5" strokeDasharray="3,3"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.2" strokeLinejoin="round"/><polygon points={"0,"+h+" "+pts+" "+w+","+h} fill={"url(#"+gid+")"}/>{label&&<text x="5" y="11" fill={color} fontSize="8" fontFamily="monospace" opacity="0.55">{label}</text>}<text x={w-5} y="11" fill="#8899b4" fontSize="7" fontFamily="monospace" opacity="0.4" textAnchor="end">{vMax.toFixed(0)}{unit}</text><text x={w-5} y={h-3} fill="#8899b4" fontSize="7" fontFamily="monospace" opacity="0.4" textAnchor="end">{vMin.toFixed(0)}{unit}</text></svg>);
+}
+
+// ─── Multi-channel GESL Viewer — renders all channels from a real signature ───
+function GESLViewer({waveformData,width=600}){
+  if(!waveformData||!waveformData.channels)return null;
+  const ch=waveformData.channels;
+  const allNames=Object.keys(ch).filter(n=>ch[n]&&ch[n].values&&ch[n].values.length>=2);
+  if(allNames.length===0)return(<div style={{padding:14,fontSize:12,color:"#fbbf24",background:"#fbbf2411",borderRadius:8}}>Waveform data received but no plottable channels. Raw channels: {Object.keys(ch).length}. The data format may need additional parsing.</div>);
+  const chanColors={"Va":"#3b82f6","Vb":"#eab308","Vc":"#ef4444","Ia":"#f472b6","Ib":"#22d3ee","Ic":"#a78bfa","In":"#34d399","F":"#f97316","PA":"#94a3b8"};
+  const dc=["#22d3ee","#34d399","#fbbf24","#ef4444","#f472b6","#a78bfa","#f97316","#3b82f6"];
+  const gc=(n,i)=>chanColors[n]||dc[i%dc.length];
+  const vC=allNames.filter(n=>{const t=(ch[n].type||n).toLowerCase();return t.includes("volt")||(/^v[abc]$/i).test(n);});
+  const iC=allNames.filter(n=>{const t=(ch[n].type||n).toLowerCase();return(t.includes("current")||(/^i[abcn]$/i).test(n))&&!vC.includes(n);});
+  const oC=allNames.filter(n=>!vC.includes(n)&&!iC.includes(n));
+  const chH=allNames.length<=3?100:allNames.length<=6?75:55;
+  return(<div>
+    {vC.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:12,color:"#8899b4",marginBottom:4,fontWeight:600}}>VOLTAGE ({vC.length})</div>{vC.map((n,i)=><div key={n} style={{marginBottom:4}}><RealWave timestamps={ch[n].timestamps} values={ch[n].values} w={width} h={chH} color={gc(n,i)} label={n+" ("+(ch[n].unit||"V")+")"} unit={ch[n].unit||"V"}/></div>)}</div>}
+    {iC.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:12,color:"#8899b4",marginBottom:4,marginTop:8,fontWeight:600}}>CURRENT ({iC.length})</div>{iC.map((n,i)=><div key={n} style={{marginBottom:4}}><RealWave timestamps={ch[n].timestamps} values={ch[n].values} w={width} h={chH} color={gc(n,i+3)} label={n+" ("+(ch[n].unit||"A")+")"} unit={ch[n].unit||"A"}/></div>)}</div>}
+    {oC.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:12,color:"#8899b4",marginBottom:4,marginTop:8,fontWeight:600}}>OTHER ({oC.length})</div>{oC.map((n,i)=><div key={n} style={{marginBottom:4}}><RealWave timestamps={ch[n].timestamps} values={ch[n].values} w={width} h={chH} color={gc(n,i+6)} label={n+" ("+(ch[n].unit||"")+")"} unit={ch[n].unit||""}/></div>)}</div>}
+    <div style={{display:"flex",gap:12,marginTop:8,fontSize:11,color:"#8899b4",flexWrap:"wrap"}}><span>Duration: {waveformData.duration_sec?.toFixed(4)}s</span><span>Samples: {(waveformData.sample_count||0).toLocaleString()}</span><span>Channels: {allNames.join(", ")}</span>{waveformData.source&&<span style={{color:waveformData.source==="live"?"#34d399":"#22d3ee"}}>Source: {waveformData.source}</span>}</div>
+  </div>);
+}
+
+// ─── Fetch waveform from backend pipeline ───
+async function fetchWaveform(email,apiKey,sigId){
+  try{
+    const r=await fetch((window.GSA_API||"")+"/gesl/waveform/"+sigId,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,apikey:apiKey})});
+    const j=await r.json();
+    if(r.ok&&j.channels)return{ok:true,data:j};
+    return{ok:false,error:j.error||"No waveform data"};
+  }catch(e){return{ok:false,error:"Service not available: "+e.message};}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GRID MENTOR — Context-Aware LLM Tutor (Anthropic Claude API)
+// ═══════════════════════════════════════════════════════════════
+
+const MENTOR_SYSTEM_PROMPT = `You are the Grid Mentor, an expert power systems instructor embedded in Grid Signal Academy — a training platform for identifying electric grid event signatures from the DOE Grid Event Signature Library (GESL) at gesl.ornl.gov.
+
+YOUR ROLE:
+- Teach users to identify grid event waveform signatures
+- Adapt explanation depth to the user's level (student, technician, engineer, operator)
+- Use clear analogies for non-engineers; use precise technical language for experts
+- Reference IEEE standards, NERC guidelines, and real-world operational context
+- Be encouraging but accurate — this is safety-critical infrastructure knowledge
+
+GESL EVENT TAG TAXONOMY (3-level hierarchy: Primary > Secondary > Tertiary):
+
+EVENTS:
+- Power Quality > Static (sustained deviation) | Transient (brief spike, <1 cycle)
+- Fault > Single Line-to-Ground/SLG (~70% of faults) | Line-to-Line | Double Line-to-Ground | Three-Phase (~5%, most severe)
+- Generation Event > Generator Trip (unit disconnects, frequency drops) | Load Rejection (load lost, frequency/voltage rise)
+- Oscillation > Inter-area (0.1-1 Hz, between generator groups) | Local (1-2 Hz, single machine)
+- Switching > Capacitor Switching (oscillatory transient from cap bank) | Line Switching (breaker operation transient)
+
+STATE:
+- Voltage Sag > Instantaneous (0.5-30 cycles) | Momentary (30 cycles-3 sec) | Temporary (3 sec-1 min) — IEEE 1159: voltage drops to 0.1-0.9 pu
+- Voltage Swell > Instantaneous | Momentary — voltage rises to 1.1-1.8 pu, often on unfaulted phases during SLG
+- Interruption > Momentary | Temporary — voltage below 0.1 pu
+- Frequency Excursion > Undershoot (<59.95 Hz, gen<load) | Overshoot (>60.05 Hz, gen>load)
+
+EQUIPMENT:
+- Interrupting Device > Circuit Breaker (fault current interruption) | Recloser (auto re-energize, repeated sag-recovery) | Fuse (one-time, permanent clear)
+- Transformer > Tap Changer (discrete voltage step) | Saturation (odd-harmonic distortion)
+- Rotating Machine > Motor Starting (6-10x inrush, voltage sag) | Generator Synchronization
+
+CONDITIONS:
+- Weather > Lightning (fast transient + fault clearing) | Wind (galloping/vegetation) | Ice (conductor sag)
+- Vegetation > Tree Contact (intermittent high-impedance arcing)
+- Equipment Failure > Insulation (partial discharge) | Mechanical (broken conductor)
+
+PHASE: Single Phase (A/B/C) | Multi-Phase (AB/BC/Three-Phase)
+
+NORMAL: Clean Sinusoidal | Normal Load Variation | Background Noise | Normal Switching | Normal Motor Start
+
+WAVEFORM IDENTIFICATION TIPS:
+- SLG fault: one phase drops dramatically (~70% reduction), others relatively stable, noise on faulted phase
+- Three-phase fault: all phases collapse simultaneously, most severe but rarest
+- Voltage sag vs swell: sag = amplitude decrease, swell = amplitude increase. Swell often appears on unfaulted phases during SLG
+- Capacitor switching vs line switching: cap switching has distinctive high-frequency oscillatory ringing; line switching is cleaner
+- Recloser vs circuit breaker: recloser shows repeated open-close-open pattern (multiple sags); CB is single operation
+- Motor start vs fault-induced sag: motor start shows gradual voltage recovery over seconds; fault sag is abrupt with sharp edges
+- Generator trip: look for frequency decline (takes seconds to develop across interconnection)
+- Lightning: extremely fast spike (microseconds) followed by fault clearing signature
+- Normal vs anomalous: normal shows clean sinusoidal with minimal noise, no sudden magnitude/frequency changes
+
+ANALOGIES FOR NON-ENGINEERS:
+- Voltage sag = water pressure dropping when someone flushes a toilet in your house
+- Frequency excursion = engine RPM changing when load changes (think car going uphill)
+- Three-phase system = three horses pulling a carriage in synchronized stride
+- Fault = one horse stumbling, the others compensate
+- Circuit breaker = automatic shutoff valve that trips when there's a problem
+- Recloser = a circuit breaker that tries again automatically (like your router rebooting)
+- Capacitor bank = a battery of energy storage that helps maintain voltage, causes a splash when connected
+
+RESPONSE GUIDELINES:
+- Keep responses concise (2-4 paragraphs max for explanations)
+- When explaining a wrong answer, say what the correct answer is, why, and what distinguishes it from what they chose
+- Reference specific waveform features (amplitude changes, frequency shifts, timing, phase relationships)
+- For students: lead with the analogy, then the technical detail
+- For engineers/operators: lead with the technical detail, reference IEEE standards
+- Always be encouraging — learning grid signatures is hard and takes practice
+- When asked about operational value, connect to real-world impact (equipment protection, safety, cost avoidance)`;
+
+function buildMentorContext(userStats, currentQuestion, userRole) {
+  let ctx = "";
+  if (userStats) {
+    const acc = userStats.ta > 0 ? Math.round((userStats.tc / userStats.ta) * 100) : 0;
+    ctx += "USER CONTEXT: Level " + userStats.lv + " (" + (DIFF[userStats.lv]||{}).n + "), " + acc + "% accuracy, " + userStats.ta + " signatures classified, best streak " + userStats.bs + ".\n";
+    if (userStats.pc) {
+      const weak = Object.entries(userStats.pc).sort((a,b) => a[1] - b[1]);
+      if (weak.length > 0) ctx += "Strongest categories: " + weak.slice(-2).map(w => w[0]).join(", ") + ". ";
+      if (weak.length > 2) ctx += "Weakest categories: " + weak.slice(0, 2).map(w => w[0]).join(", ") + ".\n";
+    }
+  }
+  if (userRole) ctx += "User role: " + userRole + ". Adapt explanation depth accordingly.\n";
+  if (currentQuestion) {
+    ctx += "\nCURRENT SIGNATURE CONTEXT:\n";
+    ctx += "- Primary: " + (currentQuestion.primary || "unknown") + "\n";
+    ctx += "- Secondary: " + (currentQuestion.secondary || "unknown") + "\n";
+    ctx += "- Tertiary: " + (currentQuestion.tertiary || "unknown") + "\n";
+    ctx += "- Description: " + (currentQuestion.desc || "") + "\n";
+    ctx += "- IEEE Reference: " + (currentQuestion.ieee || "") + "\n";
+    ctx += "- Sensor Type: " + (currentQuestion.sensor || "") + "\n";
+    if (currentQuestion.ca) ctx += "- Correct Answer: " + currentQuestion.ca + "\n";
+    if (currentQuestion.userAnswer && currentQuestion.userAnswer !== currentQuestion.ca) {
+      ctx += "- User's (incorrect) Answer: " + currentQuestion.userAnswer + "\n";
+      ctx += "\nThe user got this wrong. Explain why their answer was incorrect and what distinguishes the correct answer.\n";
+    }
+  }
+  return ctx;
+}
+
+async function callMentor(messages, userStats, currentQuestion, userRole, mentorApiKey) {
+  const contextBlock = buildMentorContext(userStats, currentQuestion, userRole);
+  const systemPrompt = MENTOR_SYSTEM_PROMPT + "\n\n" + contextBlock;
+  
+  // Try Flask backend proxy first (handles CORS + API key)
+  try {
+    const r = await fetch((window.GSA_API || "") + "/mentor/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system: systemPrompt,
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        max_tokens: 1000,
+        api_key: mentorApiKey || ""
+      })
+    });
+    const j = await r.json();
+    if (j.ok && j.text) return { ok: true, text: j.text };
+    if (j.error) return { ok: false, error: j.error };
+  } catch (e) {
+    // Backend not available
+  }
+
+  // Fallback: try direct Anthropic API (works inside Claude artifacts)
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages: messages.map(m => ({ role: m.role, content: m.content }))
+      })
+    });
+    const data = await response.json();
+    if (data.content && data.content.length > 0) {
+      return { ok: true, text: data.content.filter(c => c.type === "text").map(c => c.text).join("\n") };
+    }
+    return { ok: false, error: "No response from mentor" };
+  } catch (e) {
+    return { ok: false, error: "Grid Mentor requires either the Flask service (python3 app.py) with an Anthropic API key, or running inside Claude artifacts. Error: " + e.message };
+  }
+}
+
+// ─── Grid Mentor Chat Component ───
+function GridMentor({ userStats, currentQuestion, userRole, onClose, mentorApiKey }) {
+  const [msgs, setMsgs] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Auto-open with context if there's a wrong answer
+  useEffect(() => {
+    if (currentQuestion && currentQuestion.userAnswer && currentQuestion.userAnswer !== currentQuestion.ca) {
+      const autoMsg = "I just got a question wrong. I chose \"" + currentQuestion.userAnswer + "\" but the correct answer was \"" + currentQuestion.ca + "\". Can you explain what I should have looked for in the waveform?";
+      sendMessage(autoMsg, true);
+    } else if (msgs.length === 0) {
+      // Welcome message
+      setMsgs([{ role: "assistant", content: "Hey! I'm the Grid Mentor. I can help you understand any grid event signature, explain what you're seeing in a waveform, or answer questions about power systems — no matter your experience level.\n\nTry asking me things like:\n\u2022 \"What's the difference between a voltage sag and a swell?\"\n\u2022 \"How do I spot a capacitor switching event?\"\n\u2022 \"Why is SLG the most common fault type?\"\n\u2022 \"Explain this like I'm not an engineer\"" }]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [msgs]);
+
+  async function sendMessage(text, isAuto) {
+    if (!text.trim()) return;
+    const userMsg = { role: "user", content: text.trim() };
+    const newMsgs = isAuto ? [...msgs, userMsg] : [...msgs, userMsg];
+    setMsgs(newMsgs);
+    if (!isAuto) setInput("");
+    setLoading(true);
+    setError(null);
+
+    const result = await callMentor(
+      newMsgs.filter(m => m.role !== "system"),
+      userStats,
+      currentQuestion,
+      userRole,
+      mentorApiKey
+    );
+
+    if (result.ok) {
+      setMsgs(prev => [...prev, { role: "assistant", content: result.text }]);
+    } else {
+      setError(result.error);
+    }
+    setLoading(false);
+    setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 100);
+  }
+
+  const F = "'JetBrains Mono',monospace", FD = "'Orbitron',sans-serif";
+  const BG = "#050a16", SR = "#0b1220", BR = "#162540", CY = "#22d3ee", GN = "#34d399", AM = "#fbbf24", T1 = "#e2e8f0", T2 = "#8899b4", MNT = "#10b981";
+
+  return (
+    <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 420, background: SR, borderLeft: "1px solid " + MNT + "44", zIndex: 300, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "-4px 0 40px #00000088", transition: "transform 0.3s ease" }}>
+      {/* Header */}
+      <div style={{ padding: "14px 18px", borderBottom: "1px solid " + BR, display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        <div style={{ width: 32, height: 32, borderRadius: "50%", background: "linear-gradient(135deg," + MNT + "33," + CY + "22)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>{"\u{1F9D1}\u200D\u{1F3EB}"}</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: FD, fontSize: 13, color: MNT, fontWeight: 700, letterSpacing: 1 }}>GRID MENTOR</div>
+          <div style={{ fontSize: 10, color: T2 }}>AI-Powered Power Systems Tutor</div>
+        </div>
+        {currentQuestion && <div style={{ fontSize: 8, color: T2, background: BG, padding: "3px 8px", borderRadius: 4 }}>
+          {currentQuestion.primary} {"\u2192"} {currentQuestion.secondary}
+        </div>}
+        <button onClick={onClose} style={{ background: "none", border: "none", color: T2, cursor: "pointer", fontSize: 16, fontFamily: F }}>{"\u2715"}</button>
+      </div>
+
+        {/* Messages */}
+        <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+          {msgs.map((m, i) => (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start" }}>
+              <div style={{
+                maxWidth: "85%", padding: "10px 14px", borderRadius: 10,
+                background: m.role === "user" ? CY + "18" : BG,
+                border: "1px solid " + (m.role === "user" ? CY + "33" : BR),
+                fontSize: 11, color: T1, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word",
+              }}>
+                {m.content}
+              </div>
+              <div style={{ fontSize: 7, color: T2, marginTop: 2, padding: "0 4px" }}>
+                {m.role === "user" ? "You" : "\u{1F9D1}\u200D\u{1F3EB} Mentor"}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0" }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: MNT, animation: "sp 1s linear infinite" }}></div>
+              <span style={{ fontSize: 10, color: MNT }}>Mentor is thinking...</span>
+            </div>
+          )}
+          {error && (
+            <div style={{ fontSize: 10, color: AM, background: AM + "11", border: "1px solid " + AM + "33", borderRadius: 6, padding: 8 }}>
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* Quick prompts */}
+        {msgs.length <= 1 && !loading && (
+          <div style={{ padding: "0 16px 8px", display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {[
+              "What should I learn first?",
+              "Explain faults like I'm new",
+              "How do sags differ from swells?",
+              "Why does this matter for grid ops?"
+            ].map((q, i) => (
+              <button key={i} onClick={() => sendMessage(q)} style={{
+                background: BG, border: "1px solid " + BR, borderRadius: 12, padding: "4px 10px",
+                color: T2, fontSize: 8, cursor: "pointer", fontFamily: F
+              }}>{q}</button>
+            ))}
+          </div>
+        )}
+
+        {/* Input */}
+        <div style={{ padding: "10px 16px", borderTop: "1px solid " + BR, display: "flex", gap: 8, flexShrink: 0 }}>
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !loading) { e.preventDefault(); sendMessage(input); } }}
+            placeholder="Ask about any grid event signature..."
+            style={{ flex: 1, background: BG, border: "1px solid " + BR, borderRadius: 6, padding: "8px 12px", color: T1, fontFamily: F, fontSize: 11, outline: "none" }}
+          />
+          <button onClick={() => sendMessage(input)} disabled={loading || !input.trim()} style={{
+            background: loading ? BR : MNT + "22", border: "1px solid " + (loading ? BR : MNT),
+            borderRadius: 6, padding: "8px 14px", color: loading ? T2 : MNT,
+            fontFamily: F, fontSize: 10, cursor: loading ? "default" : "pointer", fontWeight: 600,
+          }}>Send</button>
+        </div>
+    </div>
+  );
+}
+
+function dailySeed(){const d=new Date();return d.getFullYear()*10000+(d.getMonth()+1)*100+d.getDate();}
+function seedShuffle(a,s){const r=[...a];let x=s;for(let i=r.length-1;i>0;i--){x=(x*1103515245+12345)&0x7fffffff;[r[i],r[x%(i+1)]]=[r[x%(i+1)],r[i]];}return r;}
+
+// ─── API Helper — uses Flask proxy when available, falls back to direct ───
+async function geslAPI(email,apiKey,params){
+  // Try Flask proxy first
+  try{
+    const r=await fetch((window.GSA_API||"")+"/gesl/proxy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,apikey:apiKey,...params})});
+    const j=await r.json();
+    if(r.ok)return{ok:true,data:j.data,source:j.source};
+    return{ok:false,error:j.error||"Proxy error"};
+  }catch(e){
+    // Proxy unavailable — try direct (will fail on CORS but we handle it)
+    try{
+      const r=await fetch("https://gesl.ornl.gov/api/apps/gesl",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,apikey:apiKey,...params})});
+      const t=await r.text();
+      try{return{ok:true,data:JSON.parse(t),source:"direct"};}catch{return{ok:true,data:t,source:"direct"};}
+    }catch(e2){
+      return{ok:false,error:"Cannot reach GESL. If running standalone, start the Flask service: python3 app.py"};
+    }
+  }
+}
+
+function App(){
+  const[scr,setScr]=useState("home");
+  const[st,setSt]=useState({xp:0,lv:1,tc:0,ta:0,bs:0,cs:0,pc:{},bg:[],pr:0,fc:999,rp:0,st:0,dd:0,ld:null,tb:0,gf:false,apiSet:false,nfc:0,rmV:false,sh:false,mentorUsed:false,h:[]});
+  const[gs,setGs]=useState(null);
+  const[bp,setBp]=useState(null);
+  const[lf,setLf]=useState(null);
+  const[tab,setTab]=useState("play");
+  const[mode,setMode]=useState("standard");
+  const[lb,setLb]=useState([]);
+  const[pn,setPn]=useState("");
+  const[copied,setCopied]=useState(false);
+  const[tk,setTk]=useState(0);
+  const[apiEmail,setApiEmail]=useState("");
+  const[apiKey,setApiKey]=useState("");
+  const[anthropicKey,setAnthropicKey]=useState("");
+  const[apiStatus,setApiStatus]=useState(null);
+  const[apiMsg,setApiMsg]=useState("");
+  const[geslTags,setGeslTags]=useState(null);
+  const[svcHealth,setSvcHealth]=useState(null);
+  const[mentorOpen,setMentorOpen]=useState(false);
+  const[mentorCtx,setMentorCtx]=useState(null);
+  const pool=useMemo(()=>buildPool(),[]);
+  const bpT=useRef(null);
+
+  useEffect(()=>{(async()=>{
+    try{const r=await window.storage.get("gsa3-st");if(r?.value)setSt(JSON.parse(r.value));}catch{}
+    try{const r=await window.storage.get("gsa3-pn");if(r?.value)setPn(r.value);}catch{}
+    try{const r=await window.storage.get("gsa3-lb");if(r?.value)setLb(JSON.parse(r.value));}catch{}
+    try{const r=await window.storage.get("gsa3-api");if(r?.value){const v=JSON.parse(r.value);setApiEmail(v.e||"");setApiKey(v.k||"");setAnthropicKey(v.ak||"");}}catch{}
+    // Check if Flask service is running
+    try{const r=await fetch((window.GSA_API||"")+"/health");if(r.ok){const j=await r.json();setSvcHealth(j);}}catch{}
+  })();},[]);
+
+  function up(fn){setSt(p=>{const n=fn({...p});try{window.storage.set("gsa3-st",JSON.stringify(n));}catch{}return n;});}
+  function saveLb(l){setLb(l);try{window.storage.set("gsa3-lb",JSON.stringify(l));}catch{}}
+
+  useEffect(()=>{if(st.ta>0&&st.ta%10===0){const r=st.h.slice(-10);const a=r.filter(x=>x.c).length/10;up(s=>{let l=s.lv;if(a>=0.85&&l<5)l++;else if(a<0.4&&l>1)l--;return{...s,lv:l};});}},[st.ta]);
+
+  useEffect(()=>{let nb=null;BADGES.forEach(b=>{if(!st.bg.includes(b.id)&&b.ck(st)){nb=b;up(s=>({...s,bg:[...s.bg,b.id]}));}});if(nb){setBp(nb);clearTimeout(bpT.current);bpT.current=setTimeout(()=>setBp(null),3500);}},[st.xp,st.tc,st.bs,st.lv,st.rp,st.dd,st.tb,st.gf,st.st,st.apiSet,st.nfc,st.rmV,st.sh,st.mentorUsed]);
+
+  async function testApi(){
+    if(!apiEmail||!apiKey){setApiStatus("error");setApiMsg("Enter email and API key");return;}
+    setApiStatus("testing");setApiMsg("Connecting...");
+    try{await window.storage.set("gsa3-api",JSON.stringify({e:apiEmail,k:apiKey,ak:anthropicKey}));}catch{}
+    const r=await geslAPI(apiEmail,apiKey,{output:"eventtags"});
+    if(r.ok){setGeslTags(r.data);setApiStatus("ok");setApiMsg("Connected via "+r.source+"! Tags retrieved.");up(s=>({...s,apiSet:true,gf:true}));}
+    else{setApiStatus("error");setApiMsg(r.error);up(s=>({...s,apiSet:true}));}
+  }
+
+  function genQs(d,cnt,seed,inclN){let p=inclN?pool:pool.filter(x=>!x.isNormal);const sh=seed!=null?seedShuffle(p,seed):[...p].sort(()=>Math.random()-0.5);return sh.slice(0,cnt).map((item,idx)=>{const f=d.q;const ca=item[f];const all=[...new Set(p.map(x=>x[f]))];const wr=all.filter(a=>a!==ca).sort(()=>Math.random()-0.5).slice(0,d.ch-1);return{...item,ca,choices:[ca,...wr].sort(()=>Math.random()-0.5),f,qs:(seed||Date.now())+idx};});}
+
+  function startGame(m){setMode(m);const d=DIFF[st.lv];const inclN=m==="normalfault"||st.lv>=3;let qs;if(m==="daily")qs=genQs(d,10,dailySeed(),inclN);else if(m==="timed")qs=genQs({...d,ch:4},15,null,inclN);else if(m==="normalfault"){const mx=[...pool].sort(()=>Math.random()-0.5).slice(0,10);qs=mx.map((item,idx)=>({...item,ca:item.isNormal?"Normal Operation":"Anomalous Event",choices:["Normal Operation","Anomalous Event"],f:"binary",qs:Date.now()+idx}));}else qs=genQs(d,10,null,inclN);setGs({qs,cur:0,ans:[],st:Date.now(),qst:Date.now(),tt:m==="timed"?90:0});setTk(k=>k+1);setScr("game");}
+
+  function handleAns(a){if(!gs||gs.cur>=gs.qs.length)return;const q=gs.qs[gs.cur];const correct=a===q.ca;const el=(Date.now()-gs.qst)/1000;const d=DIFF[st.lv];const tb=d.tl>0?Math.max(0,d.tl-el):5;const sb=correct?Math.min(st.cs,10)*2:0;const xpG=correct?Math.round((10+tb+sb)*d.xp):0;const isNF=mode==="normalfault";up(s=>{const ns=correct?s.cs+1:0;return{...s,xp:s.xp+xpG,tc:s.tc+(correct?1:0),ta:s.ta+1,cs:ns,bs:Math.max(s.bs,ns),pc:correct?{...s.pc,[q.primary]:(s.pc[q.primary]||0)+1}:s.pc,fc:correct?Math.min(s.fc,el):s.fc,nfc:s.nfc+(isNF&&correct?1:0),h:[...s.h.slice(-200),{c:correct,t:el}]};});const na=[...gs.ans,{a,correct,xpG,el,q}];if(gs.cur+1>=gs.qs.length)finishRound(na);else{setGs({...gs,ans:na,cur:gs.cur+1,qst:Date.now()});setTk(k=>k+1);}}
+
+  function finishRound(ans){const rc=ans.filter(a=>a.correct).length;const txp=ans.reduce((s,a)=>s+a.xpG,0);const acc=Math.round((rc/ans.length)*100);if(rc===ans.length)up(s=>({...s,pr:s.pr+1}));up(s=>({...s,rp:s.rp+1}));if(mode==="daily")up(s=>({...s,dd:s.dd+1,ld:dailySeed()}));if(mode==="timed")up(s=>({...s,tb:Math.max(s.tb,rc)}));if(pn){const e={name:pn,score:txp,mode,accuracy:acc,level:st.lv,date:new Date().toISOString().split("T")[0],badges:st.bg.length};saveLb([...lb,e].sort((a,b)=>b.score-a.score).slice(0,50));}
+    // Also post to Flask backend if available
+    try{fetch((window.GSA_API||"")+"/leaderboard",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({callsign:pn||"Anonymous",score:txp,mode,accuracy:acc,level:st.lv,badges:st.bg.length,total_xp:st.xp+txp})}).catch(()=>{});}catch{}
+    setGs(g=>({...g,ans,cur:g.qs.length}));setScr("results");}
+
+  function shareText(){const acc=st.ta>0?Math.round((st.tc/st.ta)*100):0;const lv=DIFF[st.lv];return"\u26A1 Grid Signal Academy \u26A1\n"+lv.ic+" Rank: "+lv.n+" (Lv."+st.lv+")\nAccuracy: "+acc+"% | Streak: "+st.bs+"\nBadges: "+st.bg.length+"/"+BADGES.length+" | "+st.xp+" XP\n"+st.ta+" Signatures Classified\n\nhttps://gesl.ornl.gov\n#GridSignalAcademy #GESL";}
+
+  const F="'JetBrains Mono',monospace",FD="'Orbitron',sans-serif";
+  const BG="#050a16",SR="#0b1220",BR="#162540",CY="#22d3ee",GN="#34d399",AM="#fbbf24",RD="#ef4444",OR="#f97316",T1="#e2e8f0",T2="#8899b4",PU="#a78bfa";
+
+  function Btn({children,pri,c,onClick,style:s,...p}){const[h,setH]=useState(false);const bc=c||CY;return<button onClick={onClick} onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)} style={{background:pri?(h?bc+"33":bc+"18"):(h?BR:SR),border:"1px solid "+(pri?bc:BR),borderRadius:8,padding:"14px 18px",color:pri?bc:T1,fontFamily:F,fontSize:11,cursor:"pointer",transition:"all 0.15s",...s}} {...p}>{children}</button>;}
+
+  function SB({label,value,c}){return<div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:"8px 6px",textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:c,fontFamily:FD}}>{value}</div><div style={{fontSize:11,color:T2,letterSpacing:1,textTransform:"uppercase"}}>{label}</div></div>;}
+
+  const badgeEl=bp&&<div style={{position:"fixed",top:14,left:"50%",transform:"translateX(-50%)",background:"linear-gradient(135deg,"+SR+",#1a2744)",border:"1.5px solid "+AM,borderRadius:12,padding:"12px 22px",zIndex:200,boxShadow:"0 0 30px "+AM+"33",textAlign:"center"}}><div style={{fontSize:26}}>{bp.i}</div><div style={{fontFamily:FD,fontSize:11,color:AM,fontWeight:700}}>Badge Unlocked!</div><div style={{fontSize:10,color:T1}}>{bp.n}</div></div>;
+
+  // ═══ HOME ═══
+  if(scr==="home"){const acc=st.ta>0?Math.round((st.tc/st.ta)*100):0;const lv=DIFF[st.lv];const xpN=st.lv<5?st.lv*250:null;const dd=st.ld===dailySeed();
+  return(<div style={{fontFamily:F,background:BG,color:T1,minHeight:"100vh",overflow:"auto"}}><div style={{maxWidth:960,margin:"0 auto",padding:"16px 14px"}}>
+    {/* Service status indicator */}
+    {svcHealth&&<div style={{background:GN+"11",border:"1px solid "+GN+"33",borderRadius:6,padding:"6px 10px",marginBottom:12,fontSize:11,color:GN,display:"flex",justifyContent:"space-between"}}><span>{"\u2705"} Service running — GESL proxy active</span><span style={{color:T2}}>v{svcHealth.version}</span></div>}
+    {!svcHealth&&<div style={{background:AM+"11",border:"1px solid "+AM+"33",borderRadius:6,padding:"6px 10px",marginBottom:12,fontSize:11,color:AM}}>{"\u26A0\uFE0F"} Standalone mode — run <span style={{color:T1}}>python3 app.py</span> to enable GESL proxy + leaderboard</div>}
+
+    <div style={{textAlign:"center",marginBottom:18}}>
+      <svg width="48" height="48" viewBox="0 0 64 64" style={{marginBottom:4}}><circle cx="32" cy="32" r="28" fill="none" stroke={CY} strokeWidth="1.5" opacity="0.3"/><circle cx="32" cy="32" r="3" fill={CY}/><polyline points="10,48 18,38 26,42 34,22 42,34 50,18" fill="none" stroke={CY} strokeWidth="2" opacity="0.5"/></svg>
+      <h1 style={{fontFamily:FD,fontSize:26,fontWeight:900,letterSpacing:3,background:"linear-gradient(135deg,"+CY+","+GN+")",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",margin:"0 0 1px 0"}}>GRID SIGNAL ACADEMY</h1>
+      <p style={{color:T2,fontSize:10,letterSpacing:2,margin:0,textTransform:"uppercase"}}>GESL Event Signature Training — Phase 1</p>
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:5,marginBottom:12}}><SB label="XP" value={st.xp} c={CY}/><SB label="Acc" value={acc+"%"} c={GN}/><SB label="Streak" value={st.bs} c={AM}/><SB label="Sigs" value={st.ta} c={T2}/></div>
+
+    <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10,marginBottom:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}><span style={{fontSize:10,letterSpacing:1,textTransform:"uppercase",color:T2}}>Rank</span><span style={{fontFamily:FD,fontWeight:700,color:lv.c,fontSize:11}}>{lv.ic} Lv.{st.lv} {lv.n}</span></div>
+      <div style={{height:4,background:"#1a2744",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",borderRadius:2,width:(xpN?Math.min(1,st.xp/xpN)*100:100)+"%",background:"linear-gradient(90deg,"+lv.c+"88,"+lv.c+")",transition:"width 0.5s"}}/></div>
+    </div>
+
+    <div style={{display:"flex",gap:1,marginBottom:12,background:SR,borderRadius:7,padding:2,border:"1px solid "+BR}}>
+      {[["play","\u26A1 Play"],["mentor","\u{1F9D1}\u200D\u{1F3EB} Mentor"],["compete","\u{1F3C6} Compete"],["learn","\u{1F4D6} Learn"],["config","\u{1F527} Config"],["roadmap","\u{1F5FA} Status"]].map(([k,l])=>(<button key={k} onClick={()=>{setTab(k);if(k==="roadmap")up(s=>({...s,rmV:true}));}} style={{flex:1,padding:"8px 4px",borderRadius:5,border:"none",background:tab===k?CY+"18":"transparent",color:tab===k?CY:T2,fontFamily:F,fontSize:9,cursor:"pointer",letterSpacing:0.5,fontWeight:600}}>{l}</button>))}
+    </div>
+
+    {tab==="play"&&<div style={{display:"flex",flexDirection:"column",gap:7}}>
+      <Btn pri onClick={()=>startGame("standard")} style={{padding:"14px",fontFamily:FD,fontSize:13,fontWeight:700,letterSpacing:2,textTransform:"uppercase"}}>{"\u26A1"} Standard Round</Btn>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+        <Btn pri c={AM} onClick={()=>startGame("timed")} style={{textAlign:"left"}}><div style={{fontWeight:700,fontSize:10}}>{"\u23F1"} Timed</div><div style={{fontSize:9,opacity:0.6}}>15 Qs, 90s</div></Btn>
+        <Btn pri c={dd?GN:PU} onClick={()=>startGame("daily")} style={{textAlign:"left"}}><div style={{fontWeight:700,fontSize:10}}>{dd?"\u2705":"\u{1F4C5}"} Daily</div><div style={{fontSize:9,opacity:0.6}}>{dd?"Done!":"Everyone"}</div></Btn>
+        <Btn pri c={OR} onClick={()=>startGame("normalfault")} style={{textAlign:"left"}}><div style={{fontWeight:700,fontSize:10}}>{"\u{1F50D}"} Normal?</div><div style={{fontSize:9,opacity:0.6}}>Fault or OK</div></Btn>
+      </div>
+    </div>}
+
+    {tab==="mentor"&&<div style={{display:"flex",flexDirection:"column",gap:7}}>
+      <div style={{background:SR,border:"1px solid #10b98144",borderRadius:7,padding:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+          <div style={{width:36,height:36,borderRadius:"50%",background:"linear-gradient(135deg,#10b98133,"+CY+"22)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>{"\u{1F9D1}\u200D\u{1F3EB}"}</div>
+          <div><div style={{fontFamily:FD,fontSize:13,color:"#10b981",fontWeight:700}}>Grid Mentor</div><div style={{fontSize:11,color:T2}}>AI-Powered Power Systems Tutor</div></div>
+        </div>
+        <p style={{fontSize:10,color:T2,margin:"0 0 10px 0",lineHeight:1.6}}>
+          The Grid Mentor is a context-aware AI tutor that understands your skill level, knows which signatures you struggle with, and adapts its explanations accordingly. Ask anything about power systems, grid events, waveform analysis, or IEEE standards — whether you're a student or a seasoned operator.
+        </p>
+        <Btn pri c={"#10b981"} onClick={()=>{setMentorCtx(null);setMentorOpen(true);up(s=>({...s,mentorUsed:true}));}} style={{width:"100%",fontFamily:FD,fontSize:12,fontWeight:700,letterSpacing:1,padding:"14px"}}>{"\u{1F9D1}\u200D\u{1F3EB}"} Open Grid Mentor</Btn>
+      </div>
+
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:12}}>
+        <div style={{fontSize:9,fontWeight:600,color:T1,marginBottom:6}}>What you can ask</div>
+        {[
+          {q:"Explain this like I'm not an engineer",d:"Get plain-English analogies for any power systems concept"},
+          {q:"What's the difference between SLG and DLG faults?",d:"Compare specific signature types with visual cues"},
+          {q:"I keep getting Voltage Sag wrong — help!",d:"Targeted coaching based on your weak areas"},
+          {q:"Why does identifying signatures matter for operations?",d:"Real-world operational value and cost impact"},
+          {q:"Walk me through reading a three-phase waveform",d:"Step-by-step waveform analysis instruction"},
+          {q:"What IEEE standards cover power quality events?",d:"Standards references for engineering context"},
+        ].map((ex,i)=>(<div key={i} onClick={()=>{setMentorCtx(null);setMentorOpen(true);up(s=>({...s,mentorUsed:true}));}} style={{padding:"8px 10px",marginBottom:4,background:BG,borderRadius:6,border:"1px solid "+BR,cursor:"pointer",transition:"border-color 0.15s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="#10b98155"} onMouseLeave={e=>e.currentTarget.style.borderColor=BR}>
+          <div style={{fontSize:10,color:"#10b981"}}>{"\u{1F4AC}"} "{ex.q}"</div>
+          <div style={{fontSize:10,color:T2,marginTop:2}}>{ex.d}</div>
+        </div>))}
+      </div>
+
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10,fontSize:11,color:T2,lineHeight:1.5}}>
+        <span style={{color:T1,fontWeight:600}}>How it works:</span> The Mentor receives your current level, accuracy stats, and the specific signature context (when triggered from a game question). It uses the complete GESL taxonomy and IEEE standard references to give precise, adaptive explanations. Powered by Claude (Anthropic API).
+      </div>
+    </div>}
+
+    {tab==="compete"&&<div style={{display:"flex",flexDirection:"column",gap:7}}>
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10}}><div style={{fontSize:10,color:T2,marginBottom:5}}>CALLSIGN</div><input value={pn} onChange={e=>{setPn(e.target.value);try{window.storage.set("gsa3-pn",e.target.value);}catch{}}} placeholder="Your name..." style={{width:"100%",boxSizing:"border-box",background:BG,border:"1px solid "+BR,borderRadius:5,padding:"6px 8px",color:T1,fontFamily:F,fontSize:10,outline:"none"}}/></div>
+      <Btn pri c={GN} onClick={()=>{up(s=>({...s,sh:true}));navigator.clipboard?.writeText(shareText());setCopied(true);setTimeout(()=>setCopied(false),2000);}}>{copied?"\u2705 Copied!":"\u{1F4E4} Share Progress"}</Btn>
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10}}><div style={{fontSize:10,color:T2,marginBottom:6}}>{"\u{1F3C6}"} LEADERBOARD</div>{lb.length===0?<div style={{fontSize:11,color:T2,textAlign:"center",padding:10}}>Play a round to appear!</div>:<div style={{maxHeight:200,overflowY:"auto"}}>{lb.slice(0,15).map((e,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 0",borderBottom:i<Math.min(lb.length,15)-1?"1px solid "+BR:"none"}}><span style={{width:20,fontSize:11,textAlign:"center",color:i<3?[AM,"#c0c0c0","#cd7f32"][i]:T2}}>{i<3?["\u{1F947}","\u{1F948}","\u{1F949}"][i]:i+1}</span><div style={{flex:1}}><div style={{fontSize:10,color:T1,fontWeight:600}}>{e.name}</div><div style={{fontSize:11,color:T2}}>Lv.{e.level} {e.accuracy}% {e.mode}</div></div><div style={{fontSize:11,fontWeight:700,color:CY,fontFamily:FD}}>{e.score}</div></div>))}</div>}</div>
+      <Btn onClick={()=>setScr("badges")}>{"\u{1F3C6}"} Badges ({st.bg.length}/{BADGES.length})</Btn>
+    </div>}
+
+    {tab==="learn"&&<div style={{display:"flex",flexDirection:"column",gap:7}}>
+      <Btn pri onClick={()=>setScr("library")}>{"\u{1F4D6}"} Full Signature Library</Btn>
+
+      {/* Live GESL Signature Viewer */}
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:12}}>
+        <div style={{fontFamily:FD,fontSize:11,color:CY,marginBottom:6}}>{"\u{1F52C}"} Live GESL Signature Viewer</div>
+        {(!apiEmail||!apiKey)?(<p style={{fontSize:11,color:AM,margin:0}}>Configure your GESL API key in the Config tab to view real signatures.</p>):(<div>
+          <div style={{display:"flex",gap:6,marginBottom:8,alignItems:"center"}}>
+            <input id="sigIdInput" type="number" min="1" placeholder="Signature ID (e.g. 179)" style={{flex:1,background:BG,border:"1px solid "+BR,borderRadius:5,padding:"7px 10px",color:T1,fontFamily:F,fontSize:11,outline:"none"}}/>
+            <Btn pri c={GN} onClick={async()=>{
+              const sigId=document.getElementById("sigIdInput").value;
+              if(!sigId)return;
+              const el=document.getElementById("waveformResult");
+              if(el)el.textContent="Fetching signature #"+sigId+" from gesl.ornl.gov...";
+              const r=await fetchWaveform(apiEmail,apiKey,parseInt(sigId));
+              if(r.ok){
+                // Store the waveform data in state for GESLViewer to render
+                window.__lastWaveform=r.data;
+                // Force re-render by setting a state
+                setGeslTags(prev=>({...prev,__wf:r.data}));
+              }else{
+                if(el)el.textContent="Error: "+r.error;
+              }
+            }} style={{padding:"7px 14px",fontSize:10,whiteSpace:"nowrap"}}>Fetch Waveform</Btn>
+          </div>
+          <div id="waveformResult" style={{fontSize:11,color:T2,marginBottom:6}}>{window.__lastWaveform?"Signature #"+window.__lastWaveform.sig_id+" loaded":"Enter a signature ID and click Fetch"}</div>
+          {window.__lastWaveform&&window.__lastWaveform.channels&&<GESLViewer waveformData={window.__lastWaveform} width={580}/>}
+          {window.__lastWaveform&&window.__lastWaveform.channels&&<div style={{marginTop:6,fontSize:10,color:T2,background:BG,borderRadius:4,padding:6}}>
+            <span style={{color:GN}}>{"\u2705"} Real GESL data</span> — Sig #{window.__lastWaveform.sig_id} — {Object.keys(window.__lastWaveform.channels).join(", ")} — {window.__lastWaveform.sample_count} samples — {window.__lastWaveform.duration_sec?.toFixed(4)}s
+          </div>}
+        </div>)}
+      </div>
+
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10}}><div style={{fontSize:10,color:T2,marginBottom:5}}>TAXONOMY ({pool.length} signatures)</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4}}>{Object.entries(TAXONOMY).map(([p,ss])=>(<div key={p} style={{padding:5,background:BG,borderRadius:4,border:"1px solid "+BR}}><div style={{fontSize:9,fontWeight:700,color:p==="Normal"?GN:CY,marginBottom:2}}>{p}</div>{Object.keys(ss).map(k=><div key={k} style={{fontSize:11,color:T2}}>{"\u2022"} {k}</div>)}</div>))}</div></div>
+    </div>}
+
+    {tab==="config"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:14}}>
+        <div style={{fontFamily:FD,fontSize:12,color:CY,marginBottom:8}}>{"\u{1F517}"} GESL API Configuration</div>
+        <p style={{fontSize:11,color:T2,margin:"0 0 10px 0",lineHeight:1.5}}>Connect to the live GESL at gesl.ornl.gov. Register for a free 7-day token via email. {svcHealth?"The proxy service is running — your requests will go through the local server.":"Start the Flask service (python3 app.py) to enable the GESL proxy."}</p>
+        <div style={{marginBottom:8}}><label style={{fontSize:10,color:T2,letterSpacing:1,textTransform:"uppercase",display:"block",marginBottom:3}}>Email</label><input value={apiEmail} onChange={e=>setApiEmail(e.target.value)} placeholder="your@email.com" style={{width:"100%",boxSizing:"border-box",background:BG,border:"1px solid "+BR,borderRadius:5,padding:"8px 10px",color:T1,fontFamily:F,fontSize:11,outline:"none"}}/></div>
+        <div style={{marginBottom:10}}><label style={{fontSize:10,color:T2,letterSpacing:1,textTransform:"uppercase",display:"block",marginBottom:3}}>API Key (UUID)</label><input value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" type="password" style={{width:"100%",boxSizing:"border-box",background:BG,border:"1px solid "+BR,borderRadius:5,padding:"8px 10px",color:T1,fontFamily:F,fontSize:11,outline:"none"}}/></div>
+        <Btn pri c={apiStatus==="ok"?GN:CY} onClick={testApi} style={{width:"100%"}}>{apiStatus==="testing"?"Connecting...":apiStatus==="ok"?"\u2705 Connected":"\u{1F50C} Test Connection"}</Btn>
+        {apiMsg&&<div style={{marginTop:8,fontSize:11,color:apiStatus==="ok"?GN:AM,background:(apiStatus==="ok"?GN:AM)+"0a",padding:8,borderRadius:5,lineHeight:1.5}}>{apiMsg}</div>}
+      </div>
+
+      {/* Anthropic API Key for Grid Mentor */}
+      <div style={{background:SR,border:"1px solid #10b98144",borderRadius:7,padding:14}}>
+        <div style={{fontFamily:FD,fontSize:12,color:"#10b981",marginBottom:8}}>{"\u{1F9D1}\u200D\u{1F3EB}"} Grid Mentor Configuration</div>
+        <p style={{fontSize:11,color:T2,margin:"0 0 10px 0",lineHeight:1.5}}>The Grid Mentor uses Claude (Anthropic) to provide context-aware tutoring. Enter your Anthropic API key below, or set the <span style={{color:T1}}>ANTHROPIC_API_KEY</span> environment variable before starting the service.</p>
+        <div style={{marginBottom:10}}>
+          <label style={{fontSize:10,color:T2,letterSpacing:1,textTransform:"uppercase",display:"block",marginBottom:3}}>Anthropic API Key</label>
+          <input value={anthropicKey} onChange={e=>{setAnthropicKey(e.target.value);try{window.storage.set("gsa3-api",JSON.stringify({e:apiEmail,k:apiKey,ak:e.target.value}));}catch{}}} placeholder="sk-ant-..." type="password" style={{width:"100%",boxSizing:"border-box",background:BG,border:"1px solid "+BR,borderRadius:5,padding:"8px 10px",color:T1,fontFamily:F,fontSize:11,outline:"none"}}/>
+        </div>
+        <div style={{fontSize:10,color:T2,lineHeight:1.5}}>
+          {anthropicKey ? <span style={{color:"#10b981"}}>{"\u2705"} Key saved ({anthropicKey.slice(0,10)}...)</span> : <span>{"\u26A0\uFE0F"} No key set — Mentor will not respond until configured</span>}
+          <br/><span style={{fontSize:10,opacity:0.6}}>Alternative: run <span style={{color:T1}}>ANTHROPIC_API_KEY=sk-ant-... python3 app.py</span></span>
+        </div>
+      </div>
+      {geslTags&&<div style={{background:SR,border:"1px solid "+GN+"44",borderRadius:7,padding:10}}><div style={{fontSize:11,color:GN,marginBottom:5}}>{"\u2705"} Live Event Tags</div><div style={{maxHeight:150,overflowY:"auto",fontSize:10,color:T2}}><pre style={{margin:0,whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{typeof geslTags==="string"?geslTags.slice(0,2000):JSON.stringify(geslTags,null,1).slice(0,2000)}</pre></div></div>}
+    </div>}
+
+    {tab==="roadmap"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:14}}><div style={{fontFamily:FD,fontSize:13,color:CY,marginBottom:4}}>Project Roadmap</div><p style={{fontSize:11,color:T2,margin:0,lineHeight:1.5}}>Share this view with your team. Phase 1 is the self-contained Flask service + React frontend.</p></div>
+      {ROADMAP.map((ph,pi)=>{const done=ph.items.filter(x=>x.done).length;const pct=Math.round((done/ph.items.length)*100);const sc=ph.status==="active"?CY:ph.status==="planned"?AM:T2;return(<div key={pi} style={{background:SR,border:"1px solid "+(ph.status==="active"?CY+"44":BR),borderRadius:7,padding:12}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div><span style={{fontFamily:FD,fontSize:11,color:sc,fontWeight:700}}>Phase {ph.phase}: {ph.name}</span><span style={{marginLeft:8,fontSize:10,padding:"1px 6px",borderRadius:3,background:sc+"22",color:sc}}>{ph.status}</span></div><span style={{fontSize:10,fontFamily:FD,color:sc}}>{pct}%</span></div><div style={{height:3,background:"#1a2744",borderRadius:2,overflow:"hidden",marginBottom:8}}><div style={{height:"100%",width:pct+"%",background:sc,borderRadius:2}}/></div>{ph.items.map((it,ii)=>(<div key={ii} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",fontSize:9}}><span style={{color:it.done?GN:T2,fontSize:11}}>{it.done?"\u2705":"\u2B1C"}</span><div><span style={{color:it.done?T1:T2}}>{it.n}</span>{it.note&&<span style={{fontSize:11,color:AM,marginLeft:4}}>({it.note})</span>}</div></div>))}</div>);})}
+      <Btn pri c={GN} onClick={()=>{const t="GRID SIGNAL ACADEMY STATUS\n"+new Date().toISOString().split("T")[0]+"\n\n"+ROADMAP.map(ph=>{const d=ph.items.filter(x=>x.done).length;return"PHASE "+ph.phase+": "+ph.name+" ["+ph.status.toUpperCase()+"] "+d+"/"+ph.items.length+"\n"+ph.items.map(it=>(it.done?"  [x] ":"  [ ] ")+it.n).join("\n");}).join("\n\n")+"\n\nService: "+(svcHealth?"Running ("+svcHealth.version+")":"Not running")+"\nGESL API: "+(st.apiSet?"Configured":"Not configured")+"\ngesl.ornl.gov | ORNL+LLNL+PNNL | DOE OE";navigator.clipboard?.writeText(t);setCopied(true);setTimeout(()=>setCopied(false),2000);}}>{copied?"\u2705 Copied!":"\u{1F4CB} Copy Status for Team"}</Btn>
+    </div>}
+
+    <div style={{textAlign:"center",marginTop:14,fontSize:11,color:T2,opacity:0.35}}>DOE GESL {"\u2022"} gesl.ornl.gov {"\u2022"} ORNL {"\u2022"} LLNL {"\u2022"} PNNL</div>
+  </div>{badgeEl}{mentorOpen&&<GridMentor userStats={st} currentQuestion={mentorCtx} userRole={st.lv<=2?"student":st.lv<=3?"technician":"engineer"} onClose={()=>setMentorOpen(false)} mentorApiKey={anthropicKey}/>}</div>);}
+
+  // ═══ GAME ═══
+  if(scr==="game"&&gs&&gs.cur<gs.qs.length){const q=gs.qs[gs.cur];const d=DIFF[st.lv];const prog=(gs.cur/gs.qs.length)*100;const isNF=mode==="normalfault";return(<div style={{fontFamily:F,background:BG,color:T1,minHeight:"100vh"}}><div style={{maxWidth:960,margin:"0 auto",padding:"10px 14px"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><button onClick={()=>{setScr("home");setGs(null);}} style={{background:"none",border:"none",color:T2,cursor:"pointer",fontFamily:F,fontSize:11}}>{"\u2715"}</button><div style={{flex:1,height:3,background:BR,borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:prog+"%",borderRadius:2,background:"linear-gradient(90deg,"+CY+","+GN+")",transition:"width 0.3s"}}/></div><span style={{fontSize:11,color:T2}}>{gs.cur+1}/{gs.qs.length}</span>{mode!=="standard"&&<span style={{fontSize:10,padding:"1px 5px",borderRadius:3,background:(isNF?OR:mode==="timed"?AM:PU)+"22",color:isNF?OR:mode==="timed"?AM:PU,fontWeight:600}}>{isNF?"NORMAL?":mode==="timed"?"TIMED":"DAILY"}</span>}</div>
+    <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10,marginBottom:8,textAlign:"center"}}><div style={{fontSize:10,letterSpacing:2,textTransform:"uppercase",color:T2,marginBottom:3}}>{isNF?"Normal or Anomalous?":"Identify the "+d.q+" category"}</div>{!isNF&&<div style={{fontSize:11,color:T2}}>{d.q==="primary"?"What type of grid event?":d.q==="secondary"?"What "+q.primary+" event?":q.primary+" \u2192 "+q.secondary+" \u2192 ?"}</div>}</div>
+    <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10,marginBottom:6}}>
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:11,color:CY,opacity:0.5}}>SIG #{1000+gs.cur*37+q.qs%4500}</span><span style={{fontSize:11,color:T2}}>{q.sensor} {"\u2022"} {q.ieee}</span></div>
+      <div style={{marginBottom:3}}><div style={{fontSize:11,color:T2,marginBottom:2}}>VOLTAGE</div><Wave visual={q.visual} w={600} h={70} color="#ef4444" label="Vc (V)" seed={q.qs}/><div style={{height:2}}/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:2}}><Wave visual={q.visual} w={300} h={40} color="#3b82f6" label="Va (V)" seed={q.qs+10}/><Wave visual={q.visual} w={300} h={40} color="#eab308" label="Vb (V)" seed={q.qs+20}/></div></div>
+      <div><div style={{fontSize:11,color:T2,marginBottom:2,marginTop:4}}>CURRENT</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:2}}><Wave visual={q.visual} w={200} h={35} color="#f472b6" label="Ia" seed={q.qs+30}/><Wave visual={q.visual} w={200} h={35} color="#22d3ee" label="Ib" seed={q.qs+40}/><Wave visual={q.visual} w={200} h={35} color="#a78bfa" label="Ic" seed={q.qs+50}/></div></div>
+    </div>
+    <div style={{background:AM+"06",border:"1px solid "+AM+"15",borderRadius:5,padding:"4px 8px",marginBottom:6,fontSize:11,color:AM}}>{"\u{1F4A1}"} {q.desc}</div>
+    <div style={{display:"flex",flexDirection:isNF?"row":"column",gap:5}}>{q.choices.map((ch,i)=>(<Btn key={i} onClick={()=>handleAns(ch)} style={{textAlign:"left",padding:isNF?"14px":"10px 12px",flex:isNF?1:undefined,...(isNF&&ch==="Normal Operation"?{borderColor:GN+"66"}:{}),...(isNF&&ch==="Anomalous Event"?{borderColor:RD+"66"}:{})}}>{!isNF&&<span style={{color:CY,marginRight:6,fontSize:9,opacity:0.4}}>{String.fromCharCode(65+i)}</span>}{isNF&&<span style={{marginRight:6}}>{ch==="Normal Operation"?"\u2705":"\u26A0\uFE0F"}</span>}{ch}</Btn>))}</div>
+    {st.cs>=3&&<div style={{textAlign:"center",marginTop:6,fontSize:10,color:AM,fontFamily:FD}}>{"\u{1F525}"} {st.cs} Streak!</div>}
+  </div>{badgeEl}</div>);}
+
+  // ═══ RESULTS ═══
+  if(scr==="results"&&gs){const cor=gs.ans.filter(a=>a.correct).length;const tot=gs.ans.length;const txp=gs.ans.reduce((s,a)=>s+a.xpG,0);const avg=(gs.ans.reduce((s,a)=>s+a.el,0)/tot).toFixed(1);return(<div style={{fontFamily:F,background:BG,color:T1,minHeight:"100vh"}}><div style={{maxWidth:960,margin:"0 auto",padding:"16px 14px"}}>
+    <div style={{textAlign:"center",marginBottom:14}}><div style={{fontSize:36}}>{cor===tot?"\u{1F48E}":cor>=tot*0.8?"\u26A1":"\u{1F4CA}"}</div><h2 style={{fontFamily:FD,fontSize:17,margin:"0 0 2px 0"}}>{mode==="normalfault"?"Normal vs Fault!":mode==="daily"?"Daily Drill!":mode==="timed"?"Timed Challenge!":"Round Complete"}</h2></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:12}}><SB label="Score" value={cor+"/"+tot} c={cor>=tot*0.7?GN:AM}/><SB label="XP" value={"+"+txp} c={CY}/><SB label="Avg" value={avg+"s"} c={T1}/></div>
+    <div style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:10,marginBottom:12,maxHeight:240,overflowY:"auto"}}>{gs.ans.map((a,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 0",borderBottom:i<gs.ans.length-1?"1px solid "+BR:"none"}}><span style={{fontSize:12}}>{a.correct?"\u2705":"\u274C"}</span><div style={{flex:1,minWidth:0}}><div style={{fontSize:10,color:T1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.q.ca}</div><div style={{fontSize:11,color:T2}}>{a.q.primary} {"\u2192"} {a.q.secondary}{!a.correct&&<span style={{color:RD}}> (chose: {a.a})</span>}</div></div><span style={{fontSize:10,color:CY}}>+{a.xpG}</span></div>))}</div>
+    <div style={{display:"flex",gap:6}}><Btn pri onClick={()=>startGame(mode)} style={{flex:1,fontFamily:FD,fontSize:12,fontWeight:700}}>{"\u26A1"} Again</Btn><Btn onClick={()=>{setScr("home");setGs(null);}} style={{flex:1}}>Home</Btn></div>
+    {gs.ans.some(a=>!a.correct)&&<div style={{display:"flex",gap:6,marginTop:6}}>
+      <Btn pri c={"#10b981"} onClick={()=>{
+        const firstWrong=gs.ans.find(a=>!a.correct);
+        if(firstWrong){setMentorCtx({...firstWrong.q,userAnswer:firstWrong.a});setMentorOpen(true);up(s=>({...s,mentorUsed:true}));}
+      }} style={{flex:1}}>{"\u{1F9D1}\u200D\u{1F3EB}"} Ask Mentor about wrong answers</Btn>
+    </div>}
+  </div>{badgeEl}{mentorOpen&&<GridMentor userStats={st} currentQuestion={mentorCtx} userRole={st.lv<=2?"student":st.lv<=3?"technician":"engineer"} onClose={()=>setMentorOpen(false)} mentorApiKey={anthropicKey}/>}</div>);}
+
+  // ═══ LIBRARY ═══
+  if(scr==="library"){const pks=Object.keys(TAXONOMY);const ap=lf||pks[0];return(<div style={{fontFamily:F,background:BG,color:T1,minHeight:"100vh"}}><div style={{maxWidth:960,margin:"0 auto",padding:"12px"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><button onClick={()=>{setScr("home");setLf(null);}} style={{background:"none",border:"none",color:T2,cursor:"pointer",fontFamily:F,fontSize:11}}>{"\u2190"}</button><h2 style={{fontFamily:FD,fontSize:14,margin:0}}>Signature Library</h2></div>
+    <div style={{display:"flex",gap:3,marginBottom:12,flexWrap:"wrap"}}>{pks.map(pk=><button key={pk} onClick={()=>{setLf(pk);up(s=>({...s,st:s.st+1}));}} style={{background:pk===ap?CY+"18":SR,border:"1px solid "+(pk===ap?CY:BR),borderRadius:5,padding:"3px 8px",color:pk===ap?CY:pk==="Normal"?GN:T2,fontFamily:F,fontSize:9,cursor:"pointer"}}>{pk}</button>)}</div>
+    {Object.entries(TAXONOMY[ap]||{}).map(([sec,ts])=>(<div key={sec} style={{marginBottom:14}}><h3 style={{fontFamily:FD,fontSize:11,color:GN,margin:"0 0 6px 0"}}>{sec}</h3><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(190px, 1fr))",gap:6}}>{Object.entries(ts).map(([t,info])=>(<div key={t} style={{background:SR,border:"1px solid "+BR,borderRadius:7,padding:8}}><div style={{fontSize:10,fontWeight:600,color:T1,marginBottom:3}}>{t}</div><Wave visual={info.visual} w={190} h={45} color={ap==="Normal"?GN:CY} seed={42}/><div style={{fontSize:10,color:T2,marginTop:3,lineHeight:1.4}}>{info.desc}</div><div style={{fontSize:11,color:CY,opacity:0.4,marginTop:2}}>{info.ieee} {"\u2022"} {info.sensor}</div></div>))}</div></div>))}
+  </div>{badgeEl}</div>);}
+
+  // ═══ BADGES ═══
+  if(scr==="badges"){return(<div style={{fontFamily:F,background:BG,color:T1,minHeight:"100vh"}}><div style={{maxWidth:960,margin:"0 auto",padding:"12px"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><button onClick={()=>setScr("home")} style={{background:"none",border:"none",color:T2,cursor:"pointer",fontFamily:F,fontSize:11}}>{"\u2190"}</button><h2 style={{fontFamily:FD,fontSize:14,margin:0}}>Badges</h2><span style={{marginLeft:"auto",fontSize:10,color:AM,fontFamily:FD}}>{st.bg.length}/{BADGES.length}</span></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>{BADGES.map(b=>{const e=st.bg.includes(b.id);return(<div key={b.id} style={{background:e?AM+"08":SR,border:"1px solid "+(e?AM+"44":BR),borderRadius:7,padding:9,opacity:e?1:0.4}}><div style={{display:"flex",alignItems:"center",gap:4,marginBottom:2}}><span style={{fontSize:18}}>{e?b.i:"\u{1F512}"}</span><span style={{fontFamily:FD,fontSize:9,fontWeight:700,color:e?AM:T2}}>{b.n}</span></div><div style={{fontSize:10,color:T2}}>{b.d}</div></div>);})}</div>
+  </div>{badgeEl}</div>);}
+
+  return null;
+}
+
+// Export for both environments
+window.GridSignalAcademy = App;
+
+// Auto-mount
+const rootEl = document.getElementById('root');
+if (rootEl) {
+  const root = ReactDOM.createRoot(rootEl);
+  root.render(React.createElement(App));
+}
+</script>
+</body>
+</html>

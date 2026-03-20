@@ -1,0 +1,6 @@
+# Grid Signal Academy — Dependencies
+# All are commonly pre-installed or pip-installable
+# sqlite3, json, uuid, datetime, hashlib, os, re are stdlib
+
+flask>=2.3.0
+requests>=2.28.0
